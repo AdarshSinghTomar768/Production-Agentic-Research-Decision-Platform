@@ -168,7 +168,7 @@ scripts/         seed_knowledge_base.py · run_evals.py
 tests/           e2e graph flows, guardrails, schemas, chunker, full API lifecycle
 ```
 
-## Design decisions worth stealing for interviews
+## Key design decisions
 
 - **Judge advises, code decides** — model scores feed a deterministic policy
   (`CriticAgent._enforce_policy`): threshold + dimension floor + citation validity.
