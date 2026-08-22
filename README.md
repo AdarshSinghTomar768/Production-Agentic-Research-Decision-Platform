@@ -43,7 +43,8 @@ LLM critic, gated behind human approval, and fully instrumented down to tokens a
 |---|---|
 | Orchestration | LangGraph 1.x — fan-out/join, conditional revise-loop, `interrupt()` HITL |
 | Durability | Postgres checkpointer → approval pauses survive restarts |
-| LLM access | LiteLLM (`gemini/gemini-2.5-flash` default free tier; `groq/`, `openai/`, `ollama/` = env-only switch) |
+| LLM access | LiteLLM (`gemini/gemini-3.6-flash` default free tier; `groq/`, `openai/`, `ollama/` = env-only switch) |
+| Embeddings | LiteLLM → `gemini/gemini-embedding-001` (3072-dim); deterministic hash fake for offline |
 | Structured outputs | Pydantic v2 schemas + JSON-extraction & validation-repair retry loop (provider-agnostic) |
 | Web research | Tavily API |
 | RAG | Qdrant + LiteLLM embeddings, paragraph-aware chunker |
@@ -52,17 +53,23 @@ LLM critic, gated behind human approval, and fully instrumented down to tokens a
 | API | FastAPI, async SQLAlchemy, X-API-Key auth, background mission runner |
 | Observability | Per-call token/cost/latency rows, per-node wall time, `/stats` scoreboard, printable eval tables |
 | Evals | Golden-set suite with rubric scoring + pass-rate metrics |
-| Testing | 33 tests, zero keys: deterministic FakeProvider, offline tools, MemorySaver |
-| Infra | Docker multi-stage, Compose (Postgres+Qdrant+API), GitHub Actions |
+| Testing | 33 backend tests, zero keys: deterministic FakeProvider, offline tools, MemorySaver |
+| Web UI | React 19 + Vite + TypeScript, Tailwind v4; mission launcher, approval gate, report viewer, knowledge search, eval runner |
+| Infra | Docker multi-stage ×2 (API + nginx-served UI), Compose (Postgres+Qdrant+API+Web), GitHub Actions |
 
 ## Quickstart A — zero-key demo (offline mode)
 
 ```bash
 cp .env.example .env            # FAKE_LLM=true already default-safe
 make install
-make up                         # postgres + qdrant + api on :8000
+make up                         # postgres + qdrant + api :8000 + web UI :8080
 make seed                       # sample knowledge base into Qdrant
+```
 
+Open **http://localhost:8080** — dashboard, mission launcher, approval gate, reports.
+Same flow via API:
+
+```bash
 curl -s -X POST localhost:8000/v1/missions \
   -H "X-API-Key: dev-key-change-me" -H "Content-Type: application/json" \
   -d '{"question":"Is Acme Corp a good target for an AI services campaign?"}'
@@ -71,8 +78,27 @@ curl -s -X POST localhost:8000/v1/missions \
 ## Quickstart B — real models (free tier)
 
 Put in `.env`: `GEMINI_API_KEY=...` ([aistudio.google.com/apikey](https://aistudio.google.com/apikey)),
-optionally `TAVILY_API_KEY=...`. Restart `make up`. Everything else identical.
-Groq/OpenAI/Ollama: change `MODEL=` / `JUDGE_MODEL=` only.
+optionally `TAVILY_API_KEY=...`. Then `docker compose up -d --build` (model names bake into the
+UI bundle at build time). Everything else identical. Groq/OpenAI/Ollama: change `MODEL=` /
+`JUDGE_MODEL=` only.
+
+> Free-tier note: Gemini allows ~20 requests/day per model — one real mission uses ~5+ calls,
+> a full real eval suite needs ~25+. Use fake mode (`--fake` / UI checkbox) for demos; quota
+> resets daily.
+
+## Web UI
+
+A thin control plane over the same API — no business logic lives client-side:
+
+- **Dashboard** — platform scoreboard (missions, completion rate, avg judge score, spend, node latency) + mission launcher with validation + recent-missions list
+- **Mission detail** — live status polling, human-review panel with approve / reject-with-feedback, plan JSON, final report with citations & confidence, per-node usage/cost table
+- **Knowledge** — semantic search over Qdrant + document ingest
+- **Evals** — golden-set runner with per-case pass/fail and failure notes
+
+Stack: React 19 · Vite · TypeScript · Tailwind v4 · React Router · Vitest + Testing Library
+(32 component/API-client tests). Dev mode proxies `/api → localhost:8000`; production is an
+nginx container that serves static assets and reverse-proxies `/api` to the `api` service.
+The SPA authenticates with the same `X-API-Key` header (baked from `VITE_API_KEY` at build).
 
 ## The human-approval loop
 
@@ -135,8 +161,9 @@ app/
   ingestion/     chunk → embed → upsert pipeline
   schemas/       all Pydantic contracts (plan/evidence/draft/verdict/report/API)
   db/            async engine · missions/agent_runs/usage_events/eval_runs models
-  api/routes/    missions · knowledge · evals · health
+  api/routes/    missions · knowledge · evals · health (+ fake-LLM eval override)
   evals/         golden_set.jsonl · harness + metrics rendering
+frontend/        React/Vite UI · nginx runtime container · Vitest suites
 scripts/         seed_knowledge_base.py · run_evals.py
 tests/           e2e graph flows, guardrails, schemas, chunker, full API lifecycle
 ```
@@ -163,3 +190,4 @@ tests/           e2e graph flows, guardrails, schemas, chunker, full API lifecyc
 ## Commands
 
 See `Makefile` / `AGENTS.md`: `make install · up · seed · test · lint · evals · dev`.
+Frontend: `cd frontend && npm install && npm run dev` (or `npm test` for the Vitest suite).
