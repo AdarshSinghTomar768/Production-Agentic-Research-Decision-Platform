@@ -119,3 +119,33 @@ async def test_single_model_keeps_retrying_primary(no_cost, monkeypatch):
     result = await provider.structured(Out, "sys", "user", node="test")
     assert result.attempts == 3
     assert set(calls) == {"only/x"}
+
+
+async def test_rate_limit_waits_even_when_rotating_models(no_cost, monkeypatch):
+    """Token buckets refill in wall-clock time: switching models must still
+    honor the provider's retry hint, or every attempt lands in the same
+    exhausted window (observed live on Groq's 8k TPM free tier)."""
+    seen_delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        seen_delays.append(seconds)
+
+    async def fake_acompletion(*, model, **_):
+        if model == "primary/x":
+            raise RateLimitError("TPM exceeded; Please try again in 24.3s")
+        return _resp()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    provider = LiteLLMProvider(
+        default_model="primary/x", temperature=0.2, max_tokens=64,
+        timeout_s=5, max_repair_retries=1,
+        fallback_models=["backup/y"], backoff_base_s=0.01,
+    )
+
+    result = await provider.structured(Out, "sys", "user", node="test")
+
+    assert result.value.ok is True
+    assert len(seen_delays) == 1
+    # 24.3s hint honored across the model switch, jittered ±20%
+    assert seen_delays[0] > 15

@@ -31,9 +31,13 @@ CITATION CONTRACT (critical):
 class SynthesizerAgent:
     name = "synthesizer"
 
-    def __init__(self, provider: LLMProvider, *, model: str | None = None) -> None:
+    def __init__(self, provider: LLMProvider, *,
+                 model: str | None = None,
+                 max_evidence_chars: int = 500) -> None:
         self.provider = provider
         self.model = model
+        # Prompt-side cap only: full evidence text remains in state/DB/UI.
+        self.max_evidence_chars = max_evidence_chars
 
     async def run(
         self,
@@ -44,22 +48,33 @@ class SynthesizerAgent:
         prior_draft: DraftReport | None = None,
     ) -> tuple[DraftReport, AgentUsage]:
         usage = AgentUsage(self.name)
-        lines = [
-            f"{e.evidence_id} | {e.source.value} | {e.title} | "
-            f"{'<no url>' if not e.url else e.url}\n{e.content}"
-            for e in evidence
-        ]
-        parts = [
-            f"USER QUESTION:\n{question}",
-            f"\nRESEARCH PLAN:\n{plan.model_dump_json(indent=2)}",
-            f"\nEVIDENCE POOL ({len(lines)} chunks):\n" + "\n\n".join(lines or ["(none found)"]),
-        ]
-        if critique is not None and prior_draft is not None:
+        parts = [f"USER QUESTION:\n{question}",
+                 f"\nRESEARCH PLAN:\n{plan.model_dump_json()}"]
+        if prior_draft is None:
+            # First draft: full evidence pool, bodies capped per chunk.
+            lines = [
+                f"{e.evidence_id} | {e.source.value} | {e.title} | "
+                f"{'<no url>' if not e.url else e.url}\n{e.content[:self.max_evidence_chars]}"
+                for e in evidence
+            ]
+            parts.append(
+                f"\nEVIDENCE POOL ({len(lines)} chunks):\n"
+                + "\n".join(lines or ["(none found)"]))
+        else:
+            # Revision: the prior draft already carries citations, so re-sending
+            # every body roughly doubles the biggest prompt of the mission for
+            # little gain. An id/title index keeps citation ids available while
+            # fitting tight provider TPM budgets.
+            index = "\n".join(
+                f"{e.evidence_id} | {e.source.value} | {e.title}" for e in evidence
+            )
+            parts.append("\nEVIDENCE INDEX (ids available for citations):\n"
+                         + (index or "(none found)"))
             parts.append(
                 "\nREVISION FEEDBACK (fix every point):\n"
-                + json.dumps(critique.model_dump(), indent=2)
+                + json.dumps(critique.model_dump())
                 + "\n\nPRIOR DRAFT TO REVISE:\n"
-                + prior_draft.model_dump_json(indent=2)
+                + prior_draft.model_dump_json()
             )
         user = "\n".join(parts)
 

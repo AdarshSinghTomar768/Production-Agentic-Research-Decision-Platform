@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # empty -> single-model behavior.
     llm_fallback_models: str = ""
     llm_retry_backoff_seconds: float = 2.0  # exponential base between attempts
+    # Evidence bodies are truncated to this many chars when rendered into LLM
+    # prompts (synthesizer). Full text stays in state/DB/UI; this only keeps
+    # prompt requests small enough for tight provider TPM budgets.
+    prompt_evidence_max_chars: int = 500
 
     @property
     def fallback_model_list(self) -> list[str]:

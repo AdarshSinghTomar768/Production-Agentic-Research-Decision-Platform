@@ -197,20 +197,21 @@ class LiteLLMProvider:
                          same_model: bool) -> float:
         """Exponential backoff with jitter; honors provider retry hints.
 
-        Same-model retries respect a 'Please retry in 52s' hint (capped) — the
-        key is saturated and hammering it extends cooldowns. Switching to a
-        fallback model skips the wait entirely: another provider's quota is
-        unaffected.
+        Rate limits (429) need wall-clock time to refill regardless of which
+        model we hit next — token buckets are per-model but the requests that
+        drained them happened seconds apart, so a fast switch just lands in the
+        same exhausted window. Honor 'Please retry in 24.3s' hints (capped).
+        Other transient errors (timeouts, connection resets, 5xx): switching
+        models is genuinely instant relief, so keep those switches fast.
         """
+        exponential = min(self.backoff_base_s * (2 ** (attempt - 1)), 30.0)
+        hint = _RETRY_HINT_RE.search(str(exc))
+        hint_s = float(hint.group(1) or hint.group(2)) if hint else 0.0
+        if _is_rate_limit(exc):
+            return min(max(exponential, hint_s), 60.0) * random.uniform(0.8, 1.2)
         if not same_model:
             return random.uniform(0.5, 1.5)
-        exponential = min(self.backoff_base_s * (2 ** (attempt - 1)), 30.0)
-        hint = re.search(
-            r"retry\s*(?:in|after)\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*s",
-            str(exc), re.IGNORECASE,
-        )
-        delay = max(exponential, float(hint.group(1)) if hint else 0.0)
-        return min(delay, 60.0) * random.uniform(0.8, 1.2)
+        return min(max(exponential, hint_s), 60.0) * random.uniform(0.8, 1.2)
 
     @staticmethod
     def _safe_cost(resp) -> float:
@@ -233,6 +234,15 @@ _TRANSIENT_ERROR_NAMES = {
     "UnavailableError", "DeadlockError",
 }
 
+# Provider cooldown hints, three dialects:
+#   Groq:  "Please try again in 24.32s"
+#   Gemini: '"retryDelay": "43s"' (and human-text variants)
+_RETRY_HINT_RE = re.compile(
+    r"(?:re)?try(?:\s+again)?\s*(?:in|after)\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*s"
+    r'|retryDelay"?\s*:\s*"?([0-9]+(?:\.[0-9]+)?)',
+    re.IGNORECASE,
+)
+
 
 def _is_transient(exc: Exception) -> bool:
     """True for errors worth rotating models / backing off over (429, 5xx, network)."""
@@ -240,6 +250,13 @@ def _is_transient(exc: Exception) -> bool:
         return True
     status = getattr(exc, "status_code", None)
     return isinstance(status, int) and (status == 429 or status >= 500)
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    """True for quota/TPM exhaustion — these need real wall-clock backoff."""
+    if type(exc).__name__ == "RateLimitError":
+        return True
+    return getattr(exc, "status_code", None) == 429
 
 
 # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ class Services:
     max_revisions: int = 2
     judge_pass_threshold: float = 7.0
     judge_dimension_floor: float = 5.0
+    prompt_evidence_max_chars: int = 500
 
 
 def make_services(settings: Settings) -> Services:
@@ -73,6 +74,7 @@ def make_services(settings: Settings) -> Services:
         max_revisions=settings.max_revisions,
         judge_pass_threshold=settings.judge_pass_threshold,
         judge_dimension_floor=settings.judge_dimension_floor,
+        prompt_evidence_max_chars=settings.prompt_evidence_max_chars,
     )
 
 
@@ -93,7 +95,8 @@ def build_graph(services: Services, checkpointer) :
     web_agent = WebResearchAgent(services.web_tool, max_evidence=services.max_evidence_per_agent)
     rag_agent = RagAgent(services.retriever, max_evidence=services.max_evidence_per_agent)
     data_agent = DataAgent(services.data_tool)
-    synthesizer = SynthesizerAgent(services.provider)
+    synthesizer = SynthesizerAgent(
+        services.provider, max_evidence_chars=services.prompt_evidence_max_chars)
     critic = CriticAgent(
         services.provider,
         model=services.judge_model,

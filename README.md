@@ -181,15 +181,40 @@ tests/           e2e graph flows, guardrails, schemas, chunker, full API lifecyc
 - **Telemetry as a state reducer**: parallel branches append disjoint usage rows
   via LangGraph's add-reducer — nothing double-counted, nothing lost.
 
+## Performance & resilience optimizations
+
+- **Out-of-process mission workers**: `EXECUTION_MODE=workers` moves graph
+  execution out of the API into `python -m app.worker` consumers backed by a
+  Postgres job queue (`mission_jobs` table) — time-boxed leases, `FOR UPDATE
+  SKIP LOCKED` claims, and an expired-lease sweep that recovers jobs from
+  crashed workers. Scale horizontally: `docker compose up -d --scale worker=N`.
+- **Rate-limit-aware LLM routing**: `LLM_FALLBACK_MODELS` defines an ordered
+  chain (e.g. `gemini/gemini-3.6-flash,groq/openai/gpt-oss-120b,...`). On 429s
+  or transient errors the provider rotates models per attempt; backoff honors
+  provider cooldown hints ("Please try again in 24.3s", Gemini `retryDelay`)
+  because token buckets refill in wall-clock time even across different models,
+  while non-quota blips (timeouts, resets) switch models instantly.
+- **Prompt budgeting**: evidence bodies are capped (`PROMPT_EVIDENCE_MAX_CHARS`,
+  full text stays in state/DB/UI), JSON payloads are compact, and revision
+  passes send an id/title evidence index instead of re-sending every body —
+  the synthesizer's largest call shrinks by ~40%. Combined with
+  `MAX_COMPLETION_TOKENS`, requests stay under free-tier TPM ceilings
+  (e.g. Groq's 8k tokens/min per model) so JSON outputs aren't truncated
+  mid-object.
+- **Checkpoint compression**: a zlib-wrapped LangGraph serializer shrinks
+  persisted mission state ~3-5x for evidence-heavy graphs, cutting checkpointer
+  I/O on every superstep; transparently reads legacy uncompressed blobs.
+- **Tunable DB pool**: `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` size the async engine
+  (Postgres only; SQLite dev paths skip pooling).
+
 ## Known trade-offs (deliberate)
 
 - Missions default to `EXECUTION_MODE=inline` (background task in the API
-  process). For scale-out, `EXECUTION_MODE=workers` moves execution to
-  horizontally-scalable workers over a Postgres job queue (leases + SKIP LOCKED;
-  `docker compose up -d --scale worker=N`).
-- Provider rate limits are absorbed by retry/backoff (honors provider hints) and
-  an optional fallback chain (`LLM_FALLBACK_MODELS=groq/llama-3.3-70b-versatile,...`);
-  quota ceilings on free tiers still apply.
+  process — simplest for local dev; used by tests). Compose runs `workers`.
+- Free-tier quota ceilings still apply: when Gemini's daily request cap is
+  exhausted, missions ride the fallback chain (each model has its own bucket),
+  but sustained load on free Groq tiers can still exhaust all buckets until
+  windows refill. Upgrade a tier or add providers for heavy use.
 - Schema init is `create_all`; migrations would be Alembic.
 - Injection heuristics are a speed bump, not a fortress — real defense is schema-constrained agents + citation grounding.
 
