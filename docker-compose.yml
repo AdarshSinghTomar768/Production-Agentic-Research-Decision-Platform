@@ -63,6 +63,9 @@ services:
       # The SPA bakes this at build time and sends it as X-API-Key.
       args:
         VITE_API_KEY: ${API_KEY:-dev-key-change-me}
+    environment:
+      # nginx template upstream; Railway overrides to api.railway.internal.
+      API_UPSTREAM: api
     ports:
       - "8080:8080"
     depends_on:

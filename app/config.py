@@ -3,6 +3,7 @@
 import os
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Fields exported into process env on load — LiteLLM reads provider keys
@@ -51,6 +52,17 @@ class Settings(BaseSettings):
     @property
     def fallback_model_list(self) -> list[str]:
         return [m.strip() for m in self.llm_fallback_models.split(",") if m.strip()]
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _asyncpg_scheme(cls, url: str) -> str:
+        """PaaS databases hand out postgres:// URLs; the async engine needs
+        postgresql+asyncpg://. Leave driver-tagged or non-postgres URLs alone."""
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
     embedding_model: str = "gemini/text-embedding-004"
     temperature: float = 0.2
     max_completion_tokens: int = 4096
@@ -72,6 +84,8 @@ class Settings(BaseSettings):
     tavily_api_key: str | None = None
 
     # --- Infrastructure ---
+    # Accepts plain postgres:// / postgresql:// URLs (Railway, Heroku, Render
+    # hand those out) and normalizes them for the asyncpg driver.
     database_url: str = "postgresql+asyncpg://platform:platform@localhost:5433/platform"
     db_echo: bool = False
     db_pool_size: int = 10       # postgres only; sqlite ignores pool sizing
