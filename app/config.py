@@ -29,10 +29,24 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json: bool = False
 
+    # --- Execution ---
+    # inline: missions run as background tasks inside the API process (dev/tests).
+    # workers: API only enqueues; dedicated worker processes execute (scale-out).
+    execution_mode: str = "inline"  # inline | workers
+
     # --- LLM ---
     fake_llm: bool = False  # deterministic offline provider (tests/CI)
     model: str = "gemini/gemini-2.5-flash"
     judge_model: str = "gemini/gemini-2.5-flash"
+    # Fallbacks tried (in order) when the primary model hits rate limits /
+    # transient provider errors. Comma-separated LiteLLM model strings;
+    # empty -> single-model behavior.
+    llm_fallback_models: str = ""
+    llm_retry_backoff_seconds: float = 2.0  # exponential base between attempts
+
+    @property
+    def fallback_model_list(self) -> list[str]:
+        return [m.strip() for m in self.llm_fallback_models.split(",") if m.strip()]
     embedding_model: str = "gemini/text-embedding-004"
     temperature: float = 0.2
     max_completion_tokens: int = 4096
@@ -56,9 +70,15 @@ class Settings(BaseSettings):
     # --- Infrastructure ---
     database_url: str = "postgresql+asyncpg://platform:platform@localhost:5433/platform"
     db_echo: bool = False
+    db_pool_size: int = 10       # postgres only; sqlite ignores pool sizing
+    db_max_overflow: int = 20
     qdrant_url: str = "http://localhost:6333"
     qdrant_collection: str = "knowledge_base"
     vector_size: int = 768  # gemini/text-embedding-004=768, openai/text-embedding-3-small=1536
+
+    # --- Mission queue (execution_mode=workers) ---
+    job_lease_seconds: int = 900      # claim lease; expired leases are requeued
+    worker_concurrency: int = 4       # jobs one worker process runs in parallel
 
     # --- Tool tuning ---
     web_results_per_query: int = 5

@@ -66,6 +66,29 @@ class UsageEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class MissionJob(Base):
+    """Durable work item for out-of-process mission execution.
+
+    Workers claim rows with FOR UPDATE SKIP LOCKED; a lease timestamp recovers
+    jobs from crashed workers (expired lease -> back to 'queued').
+    """
+
+    __tablename__ = "mission_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(ForeignKey("missions.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))  # start | resume
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
+                                                              nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True),
+                                                 default=_utcnow, onupdate=_utcnow)
+
+
 class EvalRun(Base):
     """One row per evaluation-suite execution."""
 

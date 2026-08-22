@@ -30,6 +30,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://platform:platform@postgres:5432/platform
       QDRANT_URL: http://qdrant:6333
+      EXECUTION_MODE: workers
     ports:
       - "8000:8000"
     depends_on:
@@ -37,6 +38,23 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build: .
+    # Out-of-process mission execution. Scale horizontally:
+    #   docker compose up -d --scale worker=4
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://platform:platform@postgres:5432/platform
+      QDRANT_URL: http://qdrant:6333
+      EXECUTION_MODE: workers
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   web:

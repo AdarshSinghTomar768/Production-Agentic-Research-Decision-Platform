@@ -20,6 +20,7 @@ from app.observability.tracking import (
     platform_stats,
     set_status,
 )
+from app.queue import enqueue_job, has_active_job
 from app.schemas.mission import (
     ApprovalDecision,
     MissionCreate,
@@ -39,7 +40,7 @@ router = APIRouter(prefix="/v1/missions", tags=["missions"], dependencies=[Depen
 
 async def _run_flow(app, mission_id: str, *, question: str | None = None,
                     decision: ApprovalDecision | None = None) -> None:
-    """Shared start/resume execution executed as a background task."""
+    """Inline mode: shared start/resume execution as a background task."""
     orchestrator = app.state.orchestrator
     engine = app.state.engine
     try:
@@ -74,6 +75,31 @@ def _schedule(app, mission_id: str, coro) -> None:
     tasks[mission_id] = asyncio.create_task(coro)
 
 
+async def _dispatch(app, mission_id: str, *, question: str | None = None,
+                    decision: ApprovalDecision | None = None) -> str:
+    """Hand the work to an executor.
+
+    inline  — background task in this process (dev/tests).
+    workers — durable row in mission_jobs; a worker process picks it up.
+              Returns the status the client should see next.
+    """
+    if app.state.settings.execution_mode != "workers":
+        _schedule(app, mission_id, _run_flow(app, mission_id,
+                                             question=question, decision=decision))
+        return MissionStatus.RUNNING.value
+
+    kind = "resume" if decision is not None else "start"
+    if await has_active_job(app.state.engine, mission_id):
+        raise HTTPException(status_code=409,
+                            detail="mission already has a queued or running job")
+    payload = (
+        {"approved": decision.approved, "feedback": decision.feedback}
+        if decision is not None else {"question": question}
+    )
+    await enqueue_job(app.state.engine, mission_id, kind, payload)
+    return MissionStatus.QUEUED.value
+
+
 # --- helpers ------------------------------------------------------------------
 
 
@@ -95,8 +121,7 @@ async def create_mission(body: MissionCreate, request: Request):
     async with session_scope(engine) as ses:
         m = await _create_mission_row(ses, mission_id=mission_id, question=question)
         status = m.status
-    _schedule(request.app, mission_id,
-              _run_flow(request.app, mission_id, question=question))
+    await _dispatch(request.app, mission_id, question=question)
     return MissionCreated(mission_id=m.id, status=MissionStatus(status))
 
 
@@ -146,9 +171,9 @@ async def decide(mission_id: str, body: ApprovalDecision, request: Request):
                 status_code=409,
                 detail=f"mission is '{m.status}'; decisions apply only to pending_approval",
             )
-    _schedule(request.app, mission_id,
-              _run_flow(request.app, mission_id, decision=body))
-    return MissionCreated(mission_id=mission_id, status=MissionStatus.RUNNING)
+    next_status = await _dispatch(request.app, mission_id, decision=body)
+    return MissionCreated(mission_id=mission_id,
+                          status=MissionStatus(next_status))
 
 
 @router.get("/{mission_id}/report")

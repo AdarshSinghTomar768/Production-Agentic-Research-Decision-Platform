@@ -8,7 +8,8 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import evals, health, knowledge, missions
 from app.config import Settings, get_settings
-from app.db.session import get_engine, init_db
+from app.db.checkpointer import make_checkpointer
+from app.db.session import get_engine_for_settings, init_db
 from app.embeddings.embedder import get_embedder
 from app.graph.builder import make_services
 from app.graph.runner import MissionOrchestrator
@@ -26,35 +27,17 @@ def configure_logging(settings: Settings) -> None:
     )
 
 
-async def _make_checkpointer(settings: Settings):
-    """Postgres-backed checkpointer when available; in-memory otherwise."""
-    if settings.database_url.startswith("postgresql"):
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-        from psycopg_pool import AsyncConnectionPool
-
-        conninfo = settings.database_url.replace("+asyncpg", "")
-        # autocommit is required: checkpointer.setup() issues CREATE INDEX CONCURRENTLY
-        pool = AsyncConnectionPool(conninfo=conninfo, open=False, max_size=10,
-                                   kwargs={"autocommit": True})
-        await pool.open()
-        saver = AsyncPostgresSaver(pool)
-        await saver.setup()
-        logger.info("langgraph checkpointer: postgres")
-        return saver, pool
-    from langgraph.checkpoint.memory import MemorySaver
-
-    logger.warning("langgraph checkpointer: in-memory (interrupts lost on restart)")
-    return MemorySaver(), None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings)
-    engine = get_engine(settings.database_url, settings.db_echo)
+    if settings.execution_mode not in ("inline", "workers"):
+        raise ValueError(f"EXECUTION_MODE must be 'inline' or 'workers', "
+                         f"got '{settings.execution_mode}'")
+    engine = get_engine_for_settings(settings)
     await init_db(engine)
 
-    checkpointer, pool = await _make_checkpointer(settings)
+    checkpointer, pool = await make_checkpointer(settings)
     orchestrator = MissionOrchestrator(make_services(settings), checkpointer)
 
     embedder = get_embedder(settings.embedding_model, fake=settings.fake_llm,
@@ -72,8 +55,9 @@ async def lifespan(app: FastAPI):
     app.state.pipeline = pipeline
     app.state.mission_tasks = {}
 
-    logger.info("%s started (env=%s fake_llm=%s model=%s)",
-                settings.app_name, settings.environment, settings.fake_llm, settings.model)
+    logger.info("%s started (env=%s fake_llm=%s model=%s execution=%s)",
+                settings.app_name, settings.environment, settings.fake_llm,
+                settings.model, settings.execution_mode)
     yield
 
     for task in list(app.state.mission_tasks.values()):

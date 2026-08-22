@@ -56,6 +56,8 @@ def make_services(settings: Settings) -> Services:
             max_tokens=settings.max_completion_tokens,
             timeout_s=settings.llm_timeout_seconds,
             max_repair_retries=settings.max_repair_retries,
+            fallback_models=settings.fallback_model_list,
+            backoff_base_s=settings.llm_retry_backoff_seconds,
         )
         web = WebSearchTool(settings.tavily_api_key,
                             max_results=settings.web_results_per_query)

@@ -183,7 +183,13 @@ tests/           e2e graph flows, guardrails, schemas, chunker, full API lifecyc
 
 ## Known trade-offs (deliberate)
 
-- Single uvicorn worker: background missions live in-process; scale-out needs a task queue (arq/Celery).
+- Missions default to `EXECUTION_MODE=inline` (background task in the API
+  process). For scale-out, `EXECUTION_MODE=workers` moves execution to
+  horizontally-scalable workers over a Postgres job queue (leases + SKIP LOCKED;
+  `docker compose up -d --scale worker=N`).
+- Provider rate limits are absorbed by retry/backoff (honors provider hints) and
+  an optional fallback chain (`LLM_FALLBACK_MODELS=groq/llama-3.3-70b-versatile,...`);
+  quota ceilings on free tiers still apply.
 - Schema init is `create_all`; migrations would be Alembic.
 - Injection heuristics are a speed bump, not a fortress — real defense is schema-constrained agents + citation grounding.
 

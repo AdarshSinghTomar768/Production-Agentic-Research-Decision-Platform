@@ -40,8 +40,13 @@ Guidance for AI coding agents working in this repository.
   `FakeProvider` for offline mode.
 - `app/db/models.py` — persistence (`missions`, `agent_runs`, `usage_events`,
   `eval_runs`). Usage/cost endpoints aggregate from these tables.
-- `app/api/routes/` — FastAPI routers; background mission execution is in
-  `routes/missions.py::_run_flow`.
+- `app/api/routes/` — FastAPI routers; mission dispatch lives in
+  `routes/missions.py::_dispatch` — `EXECUTION_MODE=inline` runs the graph in a
+  background task (default, used by tests), `workers` enqueues into the
+  `mission_jobs` table for out-of-process workers.
+- `app/queue.py` + `app/worker/main.py` — Postgres-backed job queue (lease +
+  expired-lease requeue) and `python -m app.worker` consumers; scale with
+  `docker compose up -d --scale worker=N` (SKIP LOCKED claims).
 - `app/evals/harness.py` — golden-set runner + metrics rendering.
 
 ## Conventions

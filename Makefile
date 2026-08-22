@@ -1,10 +1,13 @@
-.PHONY: install dev up down logs test lint fmt seed evals check clean
+.PHONY: install dev worker up down logs test lint fmt seed evals check clean
 
 install:
 	uv sync --all-groups
 
 dev:
 	uvicorn app.main:app --reload --port 8000
+
+worker:
+	python -m app.worker
 
 up:
 	docker compose up -d --build

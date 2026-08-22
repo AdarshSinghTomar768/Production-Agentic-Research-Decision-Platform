@@ -9,8 +9,10 @@
       <<FORCE_FAIL>>   -> the judge returns a failing verdict
 """
 
+import asyncio
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -84,15 +86,32 @@ class LLMProvider(Protocol):
 
 
 class LiteLLMProvider:
-    """Provider-agnostic completion with schema-enforced outputs."""
+    """Provider-agnostic completion with schema-enforced outputs.
+
+    Rate-limit aware: on transient provider errors (429/5xx/connection) calls
+    back off exponentially — honoring a provider-supplied retry delay when
+    present — and rotate through the configured fallback-model chain.
+    """
 
     def __init__(self, *, default_model: str, temperature: float, max_tokens: int,
-                 timeout_s: float, max_repair_retries: int) -> None:
+                 timeout_s: float, max_repair_retries: int,
+                 fallback_models: list[str] | None = None,
+                 backoff_base_s: float = 2.0) -> None:
         self.default_model = default_model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.timeout_s = timeout_s
         self.max_repair_retries = max_repair_retries
+        self.fallback_models = fallback_models or []
+        self.backoff_base_s = backoff_base_s
+
+    def _model_chain(self, primary: str) -> list[str]:
+        """Primary first, then configured fallbacks (deduped)."""
+        chain = [primary]
+        for m in self.fallback_models:
+            if m and m not in chain:
+                chain.append(m)
+        return chain
 
     @staticmethod
     def _schema_hint(schema: type[BaseModel]) -> str:
@@ -101,7 +120,8 @@ class LiteLLMProvider:
     async def structured(
         self, schema: type[T], system: str, user: str, *, node: str, model: str | None = None
     ) -> StructuredResult[T]:
-        chosen_model = model or self.default_model
+        primary = model or self.default_model
+        chain = self._model_chain(primary)
         sys_prompt = (
             f"{system}\n\n"
             "OUTPUT CONTRACT: Respond with a single JSON object and nothing else. "
@@ -117,6 +137,7 @@ class LiteLLMProvider:
 
         total_attempts = self.max_repair_retries + 1
         for attempt in range(1, total_attempts + 1):
+            chosen_model = chain[(attempt - 1) % len(chain)]
             t0 = time.monotonic()
             try:
                 resp = await litellm.acompletion(
@@ -127,9 +148,14 @@ class LiteLLMProvider:
                     timeout=self.timeout_s,
                 )
             except Exception as exc:  # transport/provider errors are retried too
-                last_errors.append(f"api_error attempt {attempt}: {exc}")
-                logger.warning("[%s] llm call failed (attempt %s/%s): %s",
-                               node, attempt, total_attempts, exc)
+                last_errors.append(
+                    f"api_error attempt {attempt} [{chosen_model}]: {exc}")
+                logger.warning("[%s] llm call failed (attempt %s/%s, model=%s): %s",
+                               node, attempt, total_attempts, chosen_model, exc)
+                if attempt < total_attempts:
+                    next_model = chain[attempt % len(chain)]
+                    await asyncio.sleep(self._backoff_seconds(
+                        exc, attempt, same_model=next_model == chosen_model))
                 continue
             latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -167,6 +193,25 @@ class LiteLLMProvider:
             f"after {total_attempts} attempts; errors={last_errors}"
         )
 
+    def _backoff_seconds(self, exc: Exception, attempt: int, *,
+                         same_model: bool) -> float:
+        """Exponential backoff with jitter; honors provider retry hints.
+
+        Same-model retries respect a 'Please retry in 52s' hint (capped) — the
+        key is saturated and hammering it extends cooldowns. Switching to a
+        fallback model skips the wait entirely: another provider's quota is
+        unaffected.
+        """
+        if not same_model:
+            return random.uniform(0.5, 1.5)
+        exponential = min(self.backoff_base_s * (2 ** (attempt - 1)), 30.0)
+        hint = re.search(
+            r"retry\s*(?:in|after)\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*s",
+            str(exc), re.IGNORECASE,
+        )
+        delay = max(exponential, float(hint.group(1)) if hint else 0.0)
+        return min(delay, 60.0) * random.uniform(0.8, 1.2)
+
     @staticmethod
     def _safe_cost(resp) -> float:
         try:
@@ -180,6 +225,21 @@ def _summarize_validation_error(exc: Exception) -> str:
         lines = [f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors()]
         return "; ".join(lines)[:2000]
     return str(exc)[:2000]
+
+
+_TRANSIENT_ERROR_NAMES = {
+    "RateLimitError", "APIConnectionError", "APIConnectionTimedOutError",
+    "Timeout", "InternalServerError", "ServiceUnavailableError",
+    "UnavailableError", "DeadlockError",
+}
+
+
+def _is_transient(exc: Exception) -> bool:
+    """True for errors worth rotating models / backing off over (429, 5xx, network)."""
+    if type(exc).__name__ in _TRANSIENT_ERROR_NAMES:
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and (status == 429 or status >= 500)
 
 
 # ---------------------------------------------------------------------------
